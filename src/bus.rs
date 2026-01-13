@@ -1,13 +1,15 @@
 use std::{
-    sync::{Arc, Mutex, Weak},
+    collections::VecDeque,
+    sync::{Arc, Condvar, Mutex, Weak},
     vec::Vec,
 };
 
 use crate::{
-    filter::{Filter, FilteredStatus},
+    filter::{FilterError, matches as filter_matches, validate_filters},
     frame::MockFrame,
 };
 use embedded_can::Frame;
+use embedded_can_interface::IdMaskFilter;
 
 pub(crate) struct MockBus {
     interfaces: Vec<Arc<Mutex<MockInterface>>>,
@@ -22,13 +24,15 @@ pub enum TransmitError {
 pub enum MockInterfaceError {
     BusAlreadyAttached,
     BusNotAttached,
+    InvalidFilters,
 }
 
 pub(crate) struct MockInterface {
-    pub(crate) filters: Vec<Filter>,
+    pub(crate) filters: Vec<IdMaskFilter>,
     me: Weak<Mutex<MockInterface>>,
     bus: Weak<Mutex<MockBus>>, // TODO remove arc<mutex> spam
-    received_frames: Vec<MockFrame>,
+    received_frames: VecDeque<MockFrame>,
+    condvar: Arc<Condvar>,
 }
 
 #[derive(Clone)]
@@ -38,13 +42,14 @@ pub struct BusHandle(Arc<Mutex<MockBus>>);
 pub struct InterfaceHandle(Arc<Mutex<MockInterface>>);
 
 impl MockInterface {
-    fn new(filters: Vec<Filter>) -> Arc<Mutex<Self>> {
+    fn new(filters: Vec<IdMaskFilter>) -> Arc<Mutex<Self>> {
         Arc::<Mutex<Self>>::new_cyclic(|me| {
             Mutex::new(Self {
                 filters,
                 me: me.clone(),
                 bus: Weak::new(),
-                received_frames: Vec::new(),
+                received_frames: VecDeque::new(),
+                condvar: Arc::new(Condvar::new()),
             })
         })
     }
@@ -96,11 +101,12 @@ impl MockBus {
             } else {
                 int.filters
                     .iter()
-                    .any(|filter| matches!(filter.matches(frame.id()), FilteredStatus::Received))
+                    .any(|filter| filter_matches(filter, frame.id()))
             };
 
             if should_receive {
-                int.received_frames.push(frame.clone());
+                int.received_frames.push_back(frame.clone());
+                int.condvar.notify_all();
             }
         }
     }
@@ -113,8 +119,9 @@ impl BusHandle {
 
     pub fn add_interface(
         &self,
-        filters: Vec<Filter>,
+        filters: Vec<IdMaskFilter>,
     ) -> Result<InterfaceHandle, MockInterfaceError> {
+        validate_filters(&filters).map_err(|_| MockInterfaceError::InvalidFilters)?;
         let interface = MockInterface::new(filters);
         interface.lock().unwrap().attach_to_bus(self.0.clone())?;
         Ok(InterfaceHandle(interface))
@@ -126,7 +133,7 @@ impl BusHandle {
 }
 
 impl InterfaceHandle {
-    pub fn new_unattached(filters: Vec<Filter>) -> Self {
+    pub fn new_unattached(filters: Vec<IdMaskFilter>) -> Self {
         Self(MockInterface::new(filters))
     }
 
@@ -139,6 +146,45 @@ impl InterfaceHandle {
     }
 
     pub fn received_frames(&self) -> Vec<MockFrame> {
-        self.0.lock().unwrap().received_frames.clone()
+        self.0
+            .lock()
+            .unwrap()
+            .received_frames
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn set_filters(&self, filters: Vec<IdMaskFilter>) -> Result<(), FilterError> {
+        validate_filters(&filters)?;
+        let mut int = self.0.lock().unwrap();
+        int.filters = filters;
+        Ok(())
+    }
+
+    pub fn pop_frame(&self) -> Option<MockFrame> {
+        self.0.lock().unwrap().received_frames.pop_front()
+    }
+
+    pub fn has_frames(&self) -> bool {
+        !self.0.lock().unwrap().received_frames.is_empty()
+    }
+
+    pub fn wait_for_frame(&self, timeout: Option<std::time::Duration>) -> bool {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(timeout) = timeout {
+            let condvar = guard.condvar.clone();
+            let (new_guard, _) = condvar
+                .wait_timeout_while(guard, timeout, |int| int.received_frames.is_empty())
+                .unwrap();
+            guard = new_guard;
+            !guard.received_frames.is_empty()
+        } else {
+            while guard.received_frames.is_empty() {
+                let condvar = guard.condvar.clone();
+                guard = condvar.wait(guard).unwrap();
+            }
+            true
+        }
     }
 }
