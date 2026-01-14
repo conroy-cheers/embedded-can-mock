@@ -11,8 +11,8 @@ pub use filter::FilterError;
 pub use frame::MockFrame;
 
 use embedded_can_interface::{
-    BlockingControl, BufferedIo, BuilderBinding, FilterConfig, IdMaskFilter, RxFrameIo, SplitTxRx,
-    TxFrameIo, TxRxState,
+    AsyncRxFrameIo, AsyncTxFrameIo, BlockingControl, BufferedIo, BuilderBinding, FilterConfig,
+    IdMaskFilter, RxFrameIo, SplitTxRx, TxFrameIo, TxRxState,
 };
 use std::time::Duration;
 
@@ -97,7 +97,24 @@ impl TxFrameIo for MockCan {
 
     fn send_timeout(&mut self, frame: &Self::Frame, _timeout: Duration) -> Result<(), Self::Error> {
         // Mock send is immediate.
-        self.send(frame)
+        TxFrameIo::send(self, frame)
+    }
+}
+
+impl AsyncTxFrameIo for MockCan {
+    type Frame = MockFrame;
+    type Error = MockError;
+
+    async fn send(&mut self, frame: &Self::Frame) -> Result<(), Self::Error> {
+        TxFrameIo::send(self, frame)
+    }
+
+    async fn send_timeout(
+        &mut self,
+        frame: &Self::Frame,
+        timeout: Duration,
+    ) -> Result<(), Self::Error> {
+        TxFrameIo::send_timeout(self, frame, timeout)
     }
 }
 
@@ -142,6 +159,23 @@ impl RxFrameIo for MockCan {
     }
 }
 
+impl AsyncRxFrameIo for MockCan {
+    type Frame = MockFrame;
+    type Error = MockError;
+
+    async fn recv(&mut self) -> Result<Self::Frame, Self::Error> {
+        RxFrameIo::recv(self)
+    }
+
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<Self::Frame, Self::Error> {
+        RxFrameIo::recv_timeout(self, timeout)
+    }
+
+    async fn wait_not_empty(&mut self) -> Result<(), Self::Error> {
+        RxFrameIo::wait_not_empty(self)
+    }
+}
+
 impl SplitTxRx for MockCan {
     type Tx = MockTx;
     type Rx = MockRx;
@@ -173,7 +207,24 @@ impl TxFrameIo for MockTx {
     }
 
     fn send_timeout(&mut self, frame: &Self::Frame, _timeout: Duration) -> Result<(), Self::Error> {
-        self.send(frame)
+        TxFrameIo::send(self, frame)
+    }
+}
+
+impl AsyncTxFrameIo for MockTx {
+    type Frame = MockFrame;
+    type Error = MockError;
+
+    async fn send(&mut self, frame: &Self::Frame) -> Result<(), Self::Error> {
+        TxFrameIo::send(self, frame)
+    }
+
+    async fn send_timeout(
+        &mut self,
+        frame: &Self::Frame,
+        timeout: Duration,
+    ) -> Result<(), Self::Error> {
+        TxFrameIo::send_timeout(self, frame, timeout)
     }
 }
 
@@ -212,6 +263,23 @@ impl RxFrameIo for MockRx {
         }
         let _ = self.iface.wait_for_frame(None);
         Ok(())
+    }
+}
+
+impl AsyncRxFrameIo for MockRx {
+    type Frame = MockFrame;
+    type Error = MockError;
+
+    async fn recv(&mut self) -> Result<Self::Frame, Self::Error> {
+        RxFrameIo::recv(self)
+    }
+
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<Self::Frame, Self::Error> {
+        RxFrameIo::recv_timeout(self, timeout)
+    }
+
+    async fn wait_not_empty(&mut self) -> Result<(), Self::Error> {
+        RxFrameIo::wait_not_empty(self)
     }
 }
 
