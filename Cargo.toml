@@ -1,8 +1,15 @@
 [package]
 name = "embedded-can-mock"
+description = "Mock CAN library implementing `embedded-can-interface` traits"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+keywords = ["io", "mock", "testing"]
+documentation = "https://docs.rs/embedded-can-mock"
+repository = "https://github.com/conroy-cheers/embedded-can-mock"
+readme = "README.md"
+exclude = [".envrc", "*.nix", "flake.lock"]
 
 [dependencies]
 embedded-can = "0.4.1"
-embedded-can-interface = { path = "../embedded-can-interface" }
+embedded-can-interface = "0.1.0"
