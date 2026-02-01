@@ -11,11 +11,9 @@ pub(crate) fn matches(filter: &IdMaskFilter, match_id: Id) -> bool {
         (embedded_can_interface::Id::Standard(fid), IdMask::Standard(mask), Id::Standard(id)) => {
             (id.as_raw() & mask) == (fid.as_raw() & mask)
         }
-        (
-            embedded_can_interface::Id::Extended(fid),
-            IdMask::Extended(mask),
-            Id::Extended(id),
-        ) => (id.as_raw() & mask) == (fid.as_raw() & mask),
+        (embedded_can_interface::Id::Extended(fid), IdMask::Extended(mask), Id::Extended(id)) => {
+            (id.as_raw() & mask) == (fid.as_raw() & mask)
+        }
         _ => false,
     }
 }
@@ -46,14 +44,8 @@ mod tests {
             id: embedded_can_interface::Id::Standard(StandardId::new(0x123).unwrap()),
             mask: IdMask::Standard(0x7FF),
         };
-        let matched = matches(
-            &filter,
-            Id::Standard(StandardId::new(0x123).unwrap()),
-        );
-        let rejected = matches(
-            &filter,
-            Id::Standard(StandardId::new(0x321).unwrap()),
-        );
+        let matched = matches(&filter, Id::Standard(StandardId::new(0x123).unwrap()));
+        let rejected = matches(&filter, Id::Standard(StandardId::new(0x321).unwrap()));
         assert!(matched);
         assert!(!rejected);
     }
@@ -64,14 +56,8 @@ mod tests {
             id: embedded_can_interface::Id::Extended(ExtendedId::new(0x1ABCDE00).unwrap()),
             mask: IdMask::Extended(0x1FFFFF00),
         };
-        let matched = matches(
-            &filter,
-            Id::Extended(ExtendedId::new(0x1ABCDE01).unwrap()),
-        );
-        let rejected = matches(
-            &filter,
-            Id::Extended(ExtendedId::new(0x1ABCDD00).unwrap()),
-        );
+        let matched = matches(&filter, Id::Extended(ExtendedId::new(0x1ABCDE01).unwrap()));
+        let rejected = matches(&filter, Id::Extended(ExtendedId::new(0x1ABCDD00).unwrap()));
         assert!(matched);
         assert!(!rejected);
     }

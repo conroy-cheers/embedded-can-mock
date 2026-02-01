@@ -294,7 +294,7 @@ impl FilterConfig for MockCan {
     }
 
     fn modify_filters(&mut self) -> Self::FiltersHandle<'_> {
-        ()
+        // Intentionally returns the unit handle type.
     }
 }
 
@@ -380,10 +380,34 @@ mod tests {
     use super::*;
     use embedded_can::{ExtendedId, Frame as _, Id, StandardId};
     use embedded_can_interface::{
-        BlockingControl, BuilderBinding, BufferedIo, FilterConfig, Id as IfaceId, IdMask,
+        BlockingControl, BufferedIo, BuilderBinding, FilterConfig, Id as IfaceId, IdMask,
         IdMaskFilter, RxFrameIo, SplitTxRx, TxFrameIo, TxRxState,
     };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::time::Duration;
+
+    fn block_on<F: Future>(mut future: F) -> F::Output {
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn wake(_: *const ()) {}
+        fn wake_by_ref(_: *const ()) {}
+        fn drop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        // Futures in this module are expected to be immediately ready.
+        let mut future = unsafe { Pin::new_unchecked(&mut future) };
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => continue,
+            }
+        }
+    }
 
     fn standard_frame(id: u16, data: &[u8]) -> MockFrame {
         MockFrame::new(Id::Standard(StandardId::new(id).unwrap()), data).unwrap()
@@ -393,6 +417,93 @@ mod tests {
         MockFrame::new(Id::Extended(ExtendedId::new(id).unwrap()), data).unwrap()
     }
 
+    #[test]
+    fn remote_frames_report_dlc_and_empty_data() {
+        let std = Id::Standard(StandardId::new(0x123).unwrap());
+        let ext = Id::Extended(ExtendedId::new(0x1ABCDE0).unwrap());
+
+        let std_remote = MockFrame::new_remote(std, 8).unwrap();
+        assert!(!std_remote.is_extended());
+        assert!(std_remote.is_remote_frame());
+        assert_eq!(std_remote.dlc(), 8);
+        assert_eq!(std_remote.data(), &[]);
+
+        let ext_remote = MockFrame::new_remote(ext, 3).unwrap();
+        assert!(ext_remote.is_extended());
+        assert!(ext_remote.is_remote_frame());
+        assert_eq!(ext_remote.dlc(), 3);
+        assert_eq!(ext_remote.data(), &[]);
+    }
+
+    #[test]
+    fn mock_error_from_conversions_cover_all_variants() {
+        assert!(matches!(
+            MockError::from(TransmitError::BusNotAttached),
+            MockError::BusNotAttached
+        ));
+        assert!(matches!(
+            MockError::from(MockInterfaceError::BusAlreadyAttached),
+            MockError::BusAlreadyAttached
+        ));
+        assert!(matches!(
+            MockError::from(MockInterfaceError::BusNotAttached),
+            MockError::BusNotAttached
+        ));
+        assert!(matches!(
+            MockError::from(MockInterfaceError::InvalidFilters),
+            MockError::InvalidFilters
+        ));
+        assert!(matches!(
+            MockError::from(FilterError::KindMismatch),
+            MockError::InvalidFilters
+        ));
+    }
+
+    #[test]
+    fn async_trait_methods_delegate_to_blocking_ones() {
+        let bus = BusHandle::new();
+        let mut can = MockCan::new_with_bus(&bus, vec![]).unwrap();
+        let frame = standard_frame(0x123, &[0x01]);
+
+        block_on(embedded_can_interface::AsyncTxFrameIo::send(&mut can, &frame)).unwrap();
+        block_on(embedded_can_interface::AsyncTxFrameIo::send_timeout(
+            &mut can,
+            &frame,
+            Duration::from_millis(1),
+        ))
+        .unwrap();
+
+        let got = block_on(embedded_can_interface::AsyncRxFrameIo::recv(&mut can)).unwrap();
+        assert_eq!(got, frame);
+    }
+
+    #[test]
+    fn mock_rx_recv_blocks_until_frame_arrives() {
+        use std::thread;
+        use std::time::Duration as StdDuration;
+
+        let bus = BusHandle::new();
+        let can_a = MockCan::new_with_bus(&bus, vec![]).unwrap();
+        let can_b = MockCan::new_with_bus(&bus, vec![]).unwrap();
+        let (mut tx_a, mut rx_a) = can_a.split();
+
+        let frame = standard_frame(0x321, &[0xAA]);
+        let frame_for_sender = frame.clone();
+        let sender = thread::spawn(move || {
+            thread::sleep(StdDuration::from_millis(10));
+            TxFrameIo::send(&mut tx_a, &frame_for_sender).unwrap();
+        });
+
+        // rx_a is initially empty, so this exercises the wait path.
+        let got = RxFrameIo::recv(&mut rx_a).unwrap();
+        assert_eq!(got, frame);
+        sender.join().unwrap();
+
+        // Ensure the other interface did also receive the same frame.
+        let (mut _tx_b, mut rx_b) = can_b.split();
+        let got_b = RxFrameIo::recv_timeout(&mut rx_b, Duration::from_millis(5)).unwrap();
+        assert_eq!(got_b, frame);
+    }
     #[test]
     fn transmit_returns_error_when_not_attached_to_bus() {
         let frame = standard_frame(0x100, &[0x10]);
@@ -514,7 +625,10 @@ mod tests {
         TxFrameIo::try_send(&mut sender, &frame3).unwrap();
 
         assert_eq!(RxFrameIo::recv(&mut receiver).unwrap(), frame1);
-        assert_eq!(RxFrameIo::recv_timeout(&mut receiver, Duration::from_millis(5)).unwrap(), frame2);
+        assert_eq!(
+            RxFrameIo::recv_timeout(&mut receiver, Duration::from_millis(5)).unwrap(),
+            frame2
+        );
         assert_eq!(RxFrameIo::recv(&mut receiver).unwrap(), frame3);
     }
 
@@ -548,7 +662,10 @@ mod tests {
         let frame2 = standard_frame(0x43, &[0xCC]);
         TxFrameIo::try_send(&mut tx, &frame2).unwrap();
         RxFrameIo::wait_not_empty(&mut rx).unwrap();
-        assert_eq!(RxFrameIo::recv_timeout(&mut rx, Duration::from_millis(5)).unwrap(), frame2);
+        assert_eq!(
+            RxFrameIo::recv_timeout(&mut rx, Duration::from_millis(5)).unwrap(),
+            frame2
+        );
     }
 
     #[test]

@@ -132,6 +132,12 @@ impl BusHandle {
     }
 }
 
+impl Default for BusHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InterfaceHandle {
     pub fn new_unattached(filters: Vec<IdMaskFilter>) -> Self {
         Self(MockInterface::new(filters))
