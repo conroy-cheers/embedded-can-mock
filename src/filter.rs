@@ -1,8 +1,16 @@
+//! Acceptance filter validation for the mock bus.
+//!
+//! Filters are expressed as [`embedded_can_interface::IdMaskFilter`] values. The mock validates
+//! that the `id` and `mask` are of compatible kinds (standard vs extended). Mismatched kinds are
+//! rejected because they cannot sensibly match any incoming ID.
+
 use embedded_can::Id;
 use embedded_can_interface::{IdMask, IdMaskFilter};
 
+/// Errors returned when validating acceptance filters.
 #[derive(Debug)]
 pub enum FilterError {
+    /// The filter’s `id` kind does not match its `mask` kind (standard vs extended).
     KindMismatch,
 }
 

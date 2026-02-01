@@ -1,9 +1,79 @@
-//! In-memory mock for embedded CAN traits.
-//! Routes frames between attached interfaces without timing or hardware.
-//! Implements transmit/receive, filtering, buffering, and builder glue for tests.
+//! `embedded-can-mock`
+//!
+//! In-memory mock implementations of common embedded CAN traits, designed for unit tests and
+//! integration tests.
+//!
+//! This crate provides a simple, deterministic “bus” that routes frames between attached
+//! interfaces without any hardware, timing, arbitration, or bit-level behavior. Frames are
+//! delivered immediately and are **broadcast to all attached interfaces (including the
+//! transmitter)**.
+//!
+//! The primary high-level type is [`MockCan`], which implements the
+//! [`embedded_can_interface`](https://docs.rs/embedded-can-interface) I/O traits (blocking and
+//! async façade traits) over the mock backend.
+//!
+//! # Quick start
+//!
+//! ```
+//! use embedded_can::{Frame as _, Id, StandardId};
+//! use embedded_can_interface::{RxFrameIo, TxFrameIo};
+//! use embedded_can_mock::{BusHandle, MockCan, MockFrame};
+//!
+//! let bus = BusHandle::new();
+//! let mut a = MockCan::new_with_bus(&bus, vec![]).unwrap();
+//! let mut b = MockCan::new_with_bus(&bus, vec![]).unwrap();
+//!
+//! let frame =
+//!     MockFrame::new(Id::Standard(StandardId::new(0x123).unwrap()), &[0x01, 0x02]).unwrap();
+//!
+//! TxFrameIo::send(&mut a, &frame).unwrap();
+//! assert_eq!(RxFrameIo::recv(&mut b).unwrap(), frame);
+//! ```
+//!
+//! # Filtering
+//!
+//! Each interface maintains a list of [`embedded_can_interface::IdMaskFilter`] entries. When the
+//! list is empty, the interface receives all frames; otherwise it only receives frames that match
+//! at least one filter.
+//!
+//! ```
+//! use embedded_can::{Frame as _, StandardId, Id as CanId};
+//! use embedded_can_interface::{FilterConfig, IdMask, IdMaskFilter, Id as IfaceId, RxFrameIo, TxFrameIo};
+//! use embedded_can_mock::{BusHandle, MockCan, MockFrame};
+//!
+//! let bus = BusHandle::new();
+//! let mut filtered = MockCan::new_with_bus(&bus, vec![]).unwrap();
+//! let mut sender = MockCan::new_with_bus(&bus, vec![]).unwrap();
+//!
+//! let accept_only_0x100 = IdMaskFilter {
+//!     id: IfaceId::Standard(StandardId::new(0x100).unwrap()),
+//!     mask: IdMask::Standard(0x7FF),
+//! };
+//! FilterConfig::set_filters(&mut filtered, &[accept_only_0x100]).unwrap();
+//!
+//! let matching = MockFrame::new(CanId::Standard(StandardId::new(0x100).unwrap()), &[0xAA]).unwrap();
+//! let rejected = MockFrame::new(CanId::Standard(StandardId::new(0x101).unwrap()), &[0xBB]).unwrap();
+//!
+//! TxFrameIo::send(&mut sender, &matching).unwrap();
+//! TxFrameIo::send(&mut sender, &rejected).unwrap();
+//!
+//! assert_eq!(RxFrameIo::recv(&mut filtered).unwrap(), matching);
+//! ```
+//!
+//! # Notes and limitations
+//!
+//! - No bus timing, bitrate, arbitration, error frames, ACK, or transceiver behavior.
+//! - Delivery is immediate and synchronous.
+//! - Transmitting broadcasts to all interfaces (including the transmitter itself).
+//! - Receive queues are unbounded in-memory collections.
 
+/// Shared mock “bus” and low-level interface handles.
 pub mod bus;
+
+/// Filter validation and matching helpers used by the mock bus.
 pub mod filter;
+
+/// Mock CAN frame implementation.
 pub mod frame;
 
 pub use bus::{BusHandle, InterfaceHandle, MockInterfaceError, TransmitError};
@@ -19,10 +89,15 @@ use std::time::Duration;
 /// Error type for the mock backend.
 #[derive(Debug)]
 pub enum MockError {
+    /// Attempted to transmit while not attached to a bus.
     BusNotAttached,
+    /// Attempted to attach an interface to a bus more than once.
     BusAlreadyAttached,
+    /// A receive operation timed out while waiting for a frame.
     Timeout,
+    /// A non-blocking receive operation had no frames available.
     WouldBlock,
+    /// A provided filter set failed validation.
     InvalidFilters,
 }
 
@@ -51,6 +126,12 @@ impl From<MockInterfaceError> for MockError {
 }
 
 /// Combined CAN interface over the mock backend.
+///
+/// `MockCan` is the “high level” API: it implements the `embedded_can_interface` traits so it can
+/// be dropped into code that is generic over `TxFrameIo` / `RxFrameIo`, etc.
+///
+/// To model multiple nodes on the same bus, construct multiple `MockCan` instances using the same
+/// [`BusHandle`].
 #[derive(Clone)]
 pub struct MockCan {
     iface: InterfaceHandle,
@@ -59,6 +140,8 @@ pub struct MockCan {
 }
 
 /// Transmit half of the mock backend.
+///
+/// Returned from [`MockCan::split`] (via the [`embedded_can_interface::SplitTxRx`] trait).
 #[derive(Clone)]
 pub struct MockTx {
     iface: InterfaceHandle,
@@ -67,6 +150,8 @@ pub struct MockTx {
 }
 
 /// Receive half of the mock backend.
+///
+/// Returned from [`MockCan::split`] (via the [`embedded_can_interface::SplitTxRx`] trait).
 #[derive(Clone)]
 pub struct MockRx {
     iface: InterfaceHandle,
@@ -75,6 +160,31 @@ pub struct MockRx {
 }
 
 impl MockCan {
+    /// Attach a new mock interface to an existing [`BusHandle`].
+    ///
+    /// `filters` are copied into the underlying interface and behave like standard acceptance
+    /// filters: if the filter list is empty, all frames are accepted; otherwise only frames
+    /// matching at least one filter are delivered.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use embedded_can::{Frame as _, Id, StandardId};
+    /// use embedded_can_interface::{RxFrameIo, TxFrameIo};
+    /// use embedded_can_mock::{BusHandle, MockCan, MockFrame};
+    ///
+    /// let bus = BusHandle::new();
+    /// let mut a = MockCan::new_with_bus(&bus, vec![]).unwrap();
+    /// let mut b = MockCan::new_with_bus(&bus, vec![]).unwrap();
+    ///
+    /// let frame = MockFrame::new(
+    ///     Id::Standard(StandardId::new(0x123).unwrap()),
+    ///     &[0x01, 0x02, 0x03],
+    /// ).unwrap();
+    ///
+    /// TxFrameIo::send(&mut a, &frame).unwrap();
+    /// assert_eq!(RxFrameIo::recv(&mut b).unwrap(), frame);
+    /// ```
     pub fn new_with_bus(bus: &BusHandle, filters: Vec<IdMaskFilter>) -> Result<Self, MockError> {
         Ok(Self {
             iface: bus.add_interface(filters).map_err(MockError::from)?,
@@ -315,6 +425,10 @@ impl BlockingControl for MockCan {
     }
 }
 
+/// Wrapper returned from [`embedded_can_interface::BufferedIo::buffered`] for [`MockCan`].
+///
+/// This type exists to satisfy the `embedded_can_interface` buffering trait; the mock backend
+/// does not model DMA/ring-buffer semantics. It simply holds references to the provided buffers.
 pub struct MockBuffered<'a, const TX: usize, const RX: usize> {
     #[allow(dead_code)]
     iface: InterfaceHandle,
@@ -342,6 +456,10 @@ impl BufferedIo for MockCan {
     }
 }
 
+/// Builder type used by [`embedded_can_interface::BuilderBinding`] for [`MockCan`].
+///
+/// This is mainly useful when higher-level code expects to construct a CAN interface using the
+/// `embedded_can_interface` builder patterns.
 pub struct MockBuilder {
     bus: BusHandle,
     filters: Vec<IdMaskFilter>,
@@ -365,11 +483,32 @@ impl BuilderBinding for MockCan {
 }
 
 impl MockBuilder {
+    /// Set the initial filter list for the interface produced by [`build`](Self::build).
+    ///
+    /// Filters are validated when the interface is created.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use embedded_can::{StandardId};
+    /// use embedded_can_interface::{BuilderBinding, Id as IfaceId, IdMask, IdMaskFilter};
+    /// use embedded_can_mock::MockCan;
+    ///
+    /// let filter = IdMaskFilter {
+    ///     id: IfaceId::Standard(StandardId::new(0x700).unwrap()),
+    ///     mask: IdMask::Standard(0x7FF),
+    /// };
+    ///
+    /// let _can = MockCan::builder().with_filters(vec![filter]).unwrap().build().unwrap();
+    /// ```
     pub fn with_filters(mut self, filters: Vec<IdMaskFilter>) -> Result<Self, MockError> {
         self.filters = filters;
         Ok(self)
     }
 
+    /// Build a [`MockCan`] attached to this builder’s internal bus.
+    ///
+    /// The returned interface is immediately usable for transmit and receive.
     pub fn build(self) -> Result<MockCan, MockError> {
         MockCan::new_with_bus(&self.bus, self.filters)
     }
@@ -465,7 +604,10 @@ mod tests {
         let mut can = MockCan::new_with_bus(&bus, vec![]).unwrap();
         let frame = standard_frame(0x123, &[0x01]);
 
-        block_on(embedded_can_interface::AsyncTxFrameIo::send(&mut can, &frame)).unwrap();
+        block_on(embedded_can_interface::AsyncTxFrameIo::send(
+            &mut can, &frame,
+        ))
+        .unwrap();
         block_on(embedded_can_interface::AsyncTxFrameIo::send_timeout(
             &mut can,
             &frame,

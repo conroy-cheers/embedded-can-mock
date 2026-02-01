@@ -1,3 +1,14 @@
+//! Shared in-memory “bus” and low-level interface handles.
+//!
+//! [`BusHandle`] owns a shared in-memory bus. You can attach any number of interfaces (nodes) to
+//! the bus via [`BusHandle::add_interface`]. Each node is represented by an [`InterfaceHandle`]
+//! and has its own receive queue and acceptance filter list.
+//!
+//! The bus is intentionally simple:
+//! - Transmit is immediate and synchronous.
+//! - Frames are broadcast to every attached interface (including the transmitter).
+//! - Receive queues are unbounded (in-memory).
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex, Weak},
@@ -15,15 +26,21 @@ pub(crate) struct MockBus {
     interfaces: Vec<Arc<Mutex<MockInterface>>>,
 }
 
+/// Errors returned when transmitting a frame via an [`InterfaceHandle`].
 #[derive(Debug)]
 pub enum TransmitError {
+    /// The interface is not attached to any bus.
     BusNotAttached,
 }
 
+/// Errors returned by bus / interface attachment operations.
 #[derive(Debug)]
 pub enum MockInterfaceError {
+    /// The interface was already attached to a bus.
     BusAlreadyAttached,
+    /// The interface is not attached to any bus.
     BusNotAttached,
+    /// One or more acceptance filters failed validation.
     InvalidFilters,
 }
 
@@ -35,9 +52,32 @@ pub(crate) struct MockInterface {
     condvar: Arc<Condvar>,
 }
 
+/// Handle to a shared in-memory bus.
+///
+/// # Example
+///
+/// ```
+/// use embedded_can::{Frame as _, Id, StandardId};
+/// use embedded_can_mock::{BusHandle, MockFrame};
+///
+/// let bus = BusHandle::new();
+/// let iface = bus.add_interface(vec![]).unwrap();
+///
+/// let frame = MockFrame::new(Id::Standard(StandardId::new(0x123).unwrap()), &[0x01]).unwrap();
+/// iface.transmit(frame.clone()).unwrap();
+/// assert_eq!(iface.pop_frame().unwrap(), frame);
+/// ```
 #[derive(Clone)]
 pub struct BusHandle(Arc<Mutex<MockBus>>);
 
+/// Handle to a single mock CAN interface (node).
+///
+/// Each interface has:
+/// - A receive queue of frames delivered by the bus.
+/// - A filter list (`IdMaskFilter`), used to decide which frames are enqueued.
+///
+/// Use [`InterfaceHandle::transmit`] to send a frame onto the bus, and
+/// [`InterfaceHandle::pop_frame`] / [`InterfaceHandle::wait_for_frame`] to receive.
 #[derive(Clone)]
 pub struct InterfaceHandle(Arc<Mutex<MockInterface>>);
 
@@ -113,10 +153,15 @@ impl MockBus {
 }
 
 impl BusHandle {
+    /// Create a new, empty bus.
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(MockBus::new())))
     }
 
+    /// Attach a new interface to this bus.
+    ///
+    /// If `filters` is empty, the interface receives all frames. Otherwise it only receives frames
+    /// matching at least one filter.
     pub fn add_interface(
         &self,
         filters: Vec<IdMaskFilter>,
@@ -127,6 +172,7 @@ impl BusHandle {
         Ok(InterfaceHandle(interface))
     }
 
+    /// Number of interfaces currently attached to the bus.
     pub fn interface_count(&self) -> usize {
         self.0.lock().unwrap().interfaces.len()
     }
@@ -139,18 +185,32 @@ impl Default for BusHandle {
 }
 
 impl InterfaceHandle {
+    /// Create a new interface that is not attached to any bus yet.
+    ///
+    /// Use [`InterfaceHandle::attach_to_bus`] to connect it to a [`BusHandle`].
     pub fn new_unattached(filters: Vec<IdMaskFilter>) -> Self {
         Self(MockInterface::new(filters))
     }
 
+    /// Attach this interface to `bus`.
+    ///
+    /// Returns [`MockInterfaceError::BusAlreadyAttached`] if the interface is already attached.
     pub fn attach_to_bus(&self, bus: &BusHandle) -> Result<(), MockInterfaceError> {
         self.0.lock().unwrap().attach_to_bus(bus.0.clone())
     }
 
+    /// Transmit `frame` onto the bus.
+    ///
+    /// Frames are broadcast to all attached interfaces (including this interface) subject to the
+    /// receivers’ acceptance filters.
     pub fn transmit(&self, frame: MockFrame) -> Result<(), TransmitError> {
         MockInterface::transmit_arc(&self.0, frame)
     }
 
+    /// Return a snapshot of all currently queued received frames.
+    ///
+    /// This does not remove frames from the receive queue; use [`pop_frame`](Self::pop_frame) to
+    /// consume frames.
     pub fn received_frames(&self) -> Vec<MockFrame> {
         self.0
             .lock()
@@ -161,6 +221,10 @@ impl InterfaceHandle {
             .collect()
     }
 
+    /// Replace this interface’s acceptance filter list.
+    ///
+    /// If `filters` is empty, the interface receives all frames. Otherwise it only receives frames
+    /// matching at least one filter.
     pub fn set_filters(&self, filters: Vec<IdMaskFilter>) -> Result<(), FilterError> {
         validate_filters(&filters)?;
         let mut int = self.0.lock().unwrap();
@@ -168,14 +232,20 @@ impl InterfaceHandle {
         Ok(())
     }
 
+    /// Remove and return the oldest received frame, if any.
     pub fn pop_frame(&self) -> Option<MockFrame> {
         self.0.lock().unwrap().received_frames.pop_front()
     }
 
+    /// Returns `true` if any frames are currently queued for receive.
     pub fn has_frames(&self) -> bool {
         !self.0.lock().unwrap().received_frames.is_empty()
     }
 
+    /// Wait until at least one frame is available to receive.
+    ///
+    /// - `timeout: None` blocks indefinitely.
+    /// - `timeout: Some(d)` waits up to `d` and returns whether a frame became available.
     pub fn wait_for_frame(&self, timeout: Option<std::time::Duration>) -> bool {
         let mut guard = self.0.lock().unwrap();
         if let Some(timeout) = timeout {
