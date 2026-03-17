@@ -12,10 +12,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-can-mock"
-version = "0.1.0"
+name = "embedded-can-interface"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a58850a2c48624af6385d155b7a603349a4e674b6f0e9706c9b190ea91b0cf1e"
 dependencies = [
  "embedded-can",
+ "nb",
+]
+
+[[package]]
+name = "embedded-can-mock"
+version = "0.1.1"
+dependencies = [
+ "embedded-can",
+ "embedded-can-interface",
 ]
 
 [[package]]
